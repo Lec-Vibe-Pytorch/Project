@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Model files (too large for git)
+# *.pth  # 주석 처리: Streamlit Cloud 배포를 위해 모델 파일 포함
+*.pt
+*.pkl
+*.h5
+
+# 특정 모델 파일은 포함 (Streamlit Cloud용)
+!model/asl_linear_best.pth
+
+# Data files
+*.csv
+*.png
+*.jpg
+*.jpeg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+

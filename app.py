@@ -1,167 +1,276 @@
-####
 import streamlit as st
 import torch
 import torch.nn as nn
-from torchvision import transforms
+import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
 import os
 
-# 1. 모델 정의 (Notebook에서 가져옴)
-class ASLLinearNet(nn.Module):
-    """nn.Linear 기반 ASL 분류 모델 (28x28 Grayscale)"""
+# 페이지 설정
+st.set_page_config(
+    page_title="ASL 분류기",
+    page_icon="✋",
+    layout="wide"
+)
+
+# 모델 클래스 정의
+class ImprovedASLClassifier(nn.Module):
+    """개선된 nn.Linear 기반 다중 계층 신경망 모델 (Batch Normalization 포함)"""
     
-    def __init__(self, input_size=784, num_classes=24):
-        super(ASLLinearNet, self).__init__()
+    def __init__(self, input_size=784, hidden_sizes=[1024, 512, 256, 128], num_classes=24):
+        super(ImprovedASLClassifier, self).__init__()
         
-        self.fc1 = nn.Linear(input_size, 512)
-        self.bn1 = nn.BatchNorm1d(512)
-        self.dropout1 = nn.Dropout(0.3)
+        layers = []
+        prev_size = input_size
         
-        self.fc2 = nn.Linear(512, 256)
-        self.bn2 = nn.BatchNorm1d(256)
-        self.dropout2 = nn.Dropout(0.3)
+        for hidden_size in hidden_sizes:
+            layers.append(nn.Linear(prev_size, hidden_size))
+            layers.append(nn.BatchNorm1d(hidden_size))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(0.3))
+            prev_size = hidden_size
         
-        self.fc3 = nn.Linear(256, 128)
-        self.bn3 = nn.BatchNorm1d(128)
-        self.dropout3 = nn.Dropout(0.2)
-        
-        self.fc4 = nn.Linear(128, num_classes)
-        
-        self.relu = nn.ReLU()
+        layers.append(nn.Linear(prev_size, num_classes))
+        self.model = nn.Sequential(*layers)
     
     def forward(self, x):
         x = x.view(x.size(0), -1)
-        
-        x = self.fc1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.dropout1(x)
-        
-        x = self.fc2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-        x = self.dropout2(x)
-        
-        x = self.fc3(x)
-        x = self.bn3(x)
-        x = self.relu(x)
-        x = self.dropout3(x)
-        
-        x = self.fc4(x)
-        
-        return x
+        return self.model(x)
 
-# 2. 설정 및 클래스 이름
-MODEL_PATH = './model/best_nnLinear_model.pth'
-# A-I (0-8), K-Y (9-23) - J와 Z 제외
-CLASS_NAMES = [chr(65 + i) if i < 9 else chr(65 + i + 1) for i in range(24)]
+# 레이블 매핑 (ASL 알파벳: A-Y, J와 Z 제외)
+label_to_letter = {i: chr(65 + i) if i < 9 else chr(66 + i) for i in range(24)}
+# 0-8: A-I, 9-23: K-Y (J=9, Z=25 제외)
 
-# 3. 모델 로드 함수
 @st.cache_resource
 def load_model():
+    """모델 로드 (캐싱)"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = ASLLinearNet(num_classes=24)
+    model = ImprovedASLClassifier(input_size=784, hidden_sizes=[1024, 512, 256, 128], num_classes=24)
     
-    if os.path.exists(MODEL_PATH):
-        try:
-            state_dict = torch.load(MODEL_PATH, map_location=device)
-            model.load_state_dict(state_dict)
-            model.to(device)
-            model.eval()
-            return model, device
-        except Exception as e:
-            st.error(f"모델 로드 중 오류 발생: {e}")
-            return None, device
-    else:
-        st.error(f"모델 파일을 찾을 수 없습니다: {MODEL_PATH}")
-        return None, device
+    # 여러 경로에서 모델 파일 찾기
+    possible_paths = [
+        './model/asl_linear_best.pth',  # 사용자 지정 경로
+        './model/nnLinear_model.pth',
+        './project/model/nnLinear_model.pth',
+        './data/nnLinear_model.pth'
+    ]
+    
+    model_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            model_path = path
+            break
+    
+    if model_path is None:
+        st.error(f"모델 파일을 찾을 수 없습니다. 다음 경로들을 확인했습니다:")
+        for path in possible_paths:
+            st.error(f"  - {path}")
+        st.stop()
+    
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        st.sidebar.info(f"모델 로드: {model_path}")
+    except Exception as e:
+        st.error(f"모델 로드 중 오류 발생: {e}")
+        st.stop()
+    
+    model.eval()
+    model = model.to(device)
+    return model, device
 
-# 4. 이미지 전처리 함수
 def preprocess_image(image):
+    """이미지 전처리"""
     transform = transforms.Compose([
-        transforms.Resize((28, 28)),
-        transforms.Grayscale(num_output_channels=1),  # Grayscale 변환
+        transforms.Grayscale(),  # RGB를 Grayscale로 변환
+        transforms.Resize((28, 28)),  # 28x28로 리사이즈
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))  # 1채널 정규화
+        transforms.Normalize(mean=[0.5], std=[0.5])
     ])
-    return transform(image).unsqueeze(0)  # 배치 차원 추가
+    return transform(image)
 
-# 5. 메인 UI
+def predict_image(image, model, device, label_to_letter):
+    """이미지 예측"""
+    # 전처리
+    image_tensor = preprocess_image(image).unsqueeze(0).to(device)
+    
+    # 예측
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        probabilities = torch.nn.functional.softmax(outputs, dim=1)
+        confidence, predicted = torch.max(probabilities, 1)
+        predicted_label = predicted.item()
+        confidence_score = confidence.item()
+    
+    # 레이블을 문자로 변환
+    predicted_letter = label_to_letter[predicted_label]
+    all_probabilities = probabilities[0].cpu().numpy()
+    
+    return predicted_letter, confidence_score, all_probabilities
+
+# 메인 앱
 def main():
-    st.set_page_config(page_title="ASL 수어 분류기", page_icon="✋")
-    
-    st.title("🤟 AI ASL Classifier")
-    st.write("이미지를 업로드하거나 샘플 이미지를 선택하면 어떤 알파벳 수어인지 알려줍니다!")
-    
-    # 사이드바
-    st.sidebar.header("📌 정보")
-    st.sidebar.info("이 앱은 PyTorch로 학습된 다층 신경망 모델(nn.Linear)을 사용합니다.")
-    st.sidebar.write("**모델 구조:**")
-    st.sidebar.write("- 입력: 28×28 Grayscale")
-    st.sidebar.write("- 레이어: 784→512→256→128→24")
-    st.sidebar.write("- BatchNorm + Dropout 적용")
+    st.title("✋ ASL (American Sign Language) 분류기")
+    st.markdown("---")
     
     # 모델 로드
-    model, device = load_model()
+    try:
+        model, device = load_model()
+        st.sidebar.success("✅ 모델이 성공적으로 로드되었습니다!")
+    except Exception as e:
+        st.error(f"모델 로드 중 오류 발생: {e}")
+        st.stop()
     
-    if model is None:
-        return
-
-    # 이미지 업로드
-    st.subheader("📤 업로드")
+    # 사이드바
+    st.sidebar.header("📋 옵션")
     
-    uploaded_file = st.file_uploader("수어 이미지를 선택하세요 (JPG, PNG)", type=["jpg", "jpeg", "png"])
+    # 이미지 선택 방법
+    option = st.sidebar.radio(
+        "이미지 선택 방법",
+        ["테스트 이미지 사용", "이미지 업로드"]
+    )
     
     image = None
-    image_source = ""
     
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file).convert('RGB')
-        image_source = uploaded_file.name
+    if option == "테스트 이미지 사용":
+        st.sidebar.subheader("테스트 이미지")
+        test_images = {
+            "a.png": "./data/asl_image/a.png",
+            "b.png": "./data/asl_image/b.png"
+        }
+        
+        selected_test = st.sidebar.selectbox(
+            "테스트 이미지 선택",
+            list(test_images.keys())
+        )
+        
+        if st.sidebar.button("이미지 로드"):
+            image_path = test_images[selected_test]
+            if os.path.exists(image_path):
+                image = Image.open(image_path).convert('RGB')
+                st.sidebar.success(f"✅ {selected_test} 로드 완료")
+            else:
+                st.sidebar.error(f"❌ 파일을 찾을 수 없습니다: {image_path}")
     
-    # 이미지가 선택되었을 때 분석 수행
+    else:  # 이미지 업로드
+        st.sidebar.subheader("이미지 업로드")
+        uploaded_file = st.sidebar.file_uploader(
+            "ASL 손 모양 이미지를 업로드하세요",
+            type=['png', 'jpg', 'jpeg']
+        )
+        
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file).convert('RGB')
+            st.sidebar.success("✅ 이미지 업로드 완료")
+    
+    # 메인 영역
     if image is not None:
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("📷 입력 이미지")
+            st.image(image, use_container_width=True)
+        
+        with col2:
+            st.subheader("🔮 예측 결과")
+            
+            # 예측 수행
+            predicted_letter, confidence, probabilities = predict_image(
+                image, model, device, label_to_letter
+            )
+            
+            # 결과 표시
+            st.markdown(f"### 예측된 문자: **{predicted_letter}**")
+            st.markdown(f"### 신뢰도: **{confidence*100:.2f}%**")
+            
+            # 신뢰도 바
+            st.progress(confidence)
+            
+            # Top 5 예측
+            st.markdown("#### Top 5 예측:")
+            top5_indices = np.argsort(probabilities)[-5:][::-1]
+            
+            for i, pred_idx in enumerate(top5_indices):
+                letter = label_to_letter[pred_idx]
+                prob = probabilities[pred_idx] * 100
+                st.markdown(f"{i+1}. **{letter}**: {prob:.2f}%")
+        
+        # 확률 분포 차트
+        st.markdown("---")
+        st.subheader("📊 전체 확률 분포")
+        
+        # plotly가 있으면 사용, 없으면 streamlit 내장 차트 사용
         try:
-            # 1. 선택된 이미지 표시
-            st.subheader("📷 선택된 이미지")
-            st.image(image, caption=f'{image_source}', use_container_width=True)
+            import pandas as pd
+            import plotly.express as px
             
-            st.write("---")  # 구분선
+            # 데이터프레임 생성
+            df = pd.DataFrame({
+                '문자': [label_to_letter[i] for i in range(24)],
+                '확률 (%)': probabilities * 100
+            })
+            df = df.sort_values('확률 (%)', ascending=False)
             
-            # 2. 분석 및 결과 표시
-            st.subheader("📊 분석 결과")
+            # 차트 생성
+            fig = px.bar(
+                df, 
+                x='문자', 
+                y='확률 (%)',
+                title='각 문자에 대한 예측 확률',
+                color='확률 (%)',
+                color_continuous_scale='Blues'
+            )
+            fig.update_layout(
+                xaxis_title="ASL 문자",
+                yaxis_title="확률 (%)",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except ImportError:
+            # plotly가 없으면 streamlit 내장 차트 사용
+            import pandas as pd
             
-            with st.spinner('분석 중...'):
-                # 전처리 및 예측
-                input_tensor = preprocess_image(image).to(device)
-                
-                with torch.no_grad():
-                    outputs = model(input_tensor)
-                    probabilities = torch.nn.functional.softmax(outputs, dim=1)
-                    confidence, predicted = torch.max(probabilities, 1)
-                    
-                    predicted_idx = predicted.item()
-                    predicted_class = CLASS_NAMES[predicted_idx]
-                    confidence_score = confidence.item() * 100
-                
-                # 결과 표시
-                st.success(f"### 예측: **{predicted_class}**")
-                st.metric(label="신뢰도", value=f"{confidence_score:.2f}%")
-                
-                # Top 3 확률 표시
-                st.write("---")
-                st.write("**상위 3개 예측:**")
-                top3_prob, top3_idx = torch.topk(probabilities, 3)
-                for i in range(3):
-                    cls = CLASS_NAMES[top3_idx[0][i].item()]
-                    prob = top3_prob[0][i].item() * 100
-                    st.write(f"{i+1}. **{cls}**: {prob:.2f}%")
-                    st.progress(int(prob))
-                                
-        except Exception as e:
-            st.error(f"이미지 처리 중 오류가 발생했습니다: {e}")
-
+            # 데이터프레임 생성
+            df = pd.DataFrame({
+                '문자': [label_to_letter[i] for i in range(24)],
+                '확률 (%)': probabilities * 100
+            })
+            df = df.sort_values('확률 (%)', ascending=False)
+            
+            # Streamlit 내장 bar_chart 사용
+            st.bar_chart(df.set_index('문자')['확률 (%)'])
+        
+    else:
+        st.info("👈 사이드바에서 테스트 이미지를 선택하거나 이미지를 업로드하세요.")
+        
+        # 테스트 이미지 미리보기
+        st.markdown("---")
+        st.subheader("📁 사용 가능한 테스트 이미지")
+        
+        col1, col2 = st.columns(2)
+        
+        test_images = {
+            "a.png": "./data/asl_image/a.png",
+            "b.png": "./data/asl_image/b.png"
+        }
+        
+        for idx, (name, path) in enumerate(test_images.items()):
+            with col1 if idx == 0 else col2:
+                if os.path.exists(path):
+                    st.image(path, caption=name, use_container_width=True)
+                else:
+                    st.error(f"파일을 찾을 수 없습니다: {path}")
+    
+    # 푸터
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; color: gray;'>
+        <p>ASL 분류기 | PyTorch nn.Linear 기반 신경망 모델</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main()
+
